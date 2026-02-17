@@ -1,0 +1,26 @@
+[
+  {
+    "id": "adult_tech_consumer_30_45",
+    "title": "Adult Tech Consumer (30-45)",
+    "profile": "I am a working adult between 30 and 45 years old. I use mobile and web apps every day for banking, shopping, productivity, and communication. I value speed, low friction, and clear pricing. I avoid products that require long setup or repeated manual tasks.",
+    "age_demography": "30-45 years old, urban and suburban, full-time working professionals",
+    "tech_savviness": "Medium to high. Comfortable trying new apps but expects intuitive UX.",
+    "product_context": "Consumer subscription and productivity apps"
+  },
+  {
+    "id": "small_business_owner_35_55",
+    "title": "Small Business Owner (35-55)",
+    "profile": "I run a small business and make software purchase decisions myself. I care about ROI, onboarding time, and support responsiveness. I need tools my team can adopt quickly without dedicated IT resources.",
+    "age_demography": "35-55 years old, SMB owners or operators",
+    "tech_savviness": "Medium. Practical user focused on outcomes over features.",
+    "product_context": "B2B SaaS operations and workflow tools"
+  },
+  {
+    "id": "student_mobile_first_18_24",
+    "title": "Student Mobile-First User (18-24)",
+    "profile": "I am a student and I mostly use mobile apps. I compare options quickly and switch if an app feels slow or confusing. I have limited budget and prefer free tiers with clear value.",
+    "age_demography": "18-24 years old, college and early-career users",
+    "tech_savviness": "High on mobile usage, low patience for complexity.",
+    "product_context": "Consumer apps with freemium business models"
+  }
+]

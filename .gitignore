@@ -9,3 +9,6 @@ venv/
 .venv/
 *.egg-info/
 *.log
+
+/docs
+/data

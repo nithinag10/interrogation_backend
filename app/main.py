@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -20,6 +21,7 @@ from app.graph import build_graph
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STAKEHOLDER_FILE = PROJECT_ROOT / "data" / "stakeholders.json"
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
 
 class StakeholderDefinition(BaseModel):
@@ -71,6 +73,21 @@ class SimulationRuntime:
         self.final_state: dict[str, Any] | None = None
 
 
+def _cors_allow_origins() -> list[str]:
+    configured = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+    if configured:
+        return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
+    return [
+        "https://idea-sharpen.vercel.app",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+
 app = FastAPI(
     title="Interrogation Agent API",
     version="0.1.0",
@@ -78,12 +95,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -216,6 +228,45 @@ def _emit_reasoning(
     _emit(runtime, "reasoning.step", payload)
 
 
+def _emit_agent_update(
+    runtime: SimulationRuntime,
+    step: int,
+    stage: str,
+    action: str,
+    summary: str,
+    details: dict[str, Any] | None = None,
+    hypothesis_id: str | None = None,
+    hypothesis_title: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "step": step,
+        "stage": stage,
+        "action": action,
+        "summary": summary,
+        "details": details or {},
+    }
+    if hypothesis_id:
+        payload["hypothesis_id"] = hypothesis_id
+    if hypothesis_title:
+        payload["hypothesis_title"] = hypothesis_title
+    _emit(runtime, "agent.update", payload)
+
+
+def _transcript_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    transcript_messages = []
+    transcript_lines: list[str] = []
+    for item in messages:
+        role = str(item.get("role", ""))
+        content = str(item.get("content", ""))
+        transcript_messages.append({"role": role, "content": content})
+        transcript_lines.append(f"{role}: {content}")
+    return {
+        "messages": transcript_messages,
+        "text": "\n".join(transcript_lines),
+        "message_count": len(transcript_messages),
+    }
+
+
 def _run_simulation(
     runtime: SimulationRuntime,
     request: StartSimulationRequest,
@@ -243,6 +294,14 @@ def _run_simulation(
             phase="thinking",
             message="Simulation started. Analyzing idea and preparing candidate hypotheses.",
         )
+        _emit_agent_update(
+            runtime,
+            step=0,
+            stage="analysis",
+            action="started",
+            summary="Analyzing input and preparing hypotheses.",
+            details={"user_input": user_input},
+        )
 
         step = 0
         known_hypotheses: set[str] = set()
@@ -264,6 +323,37 @@ def _run_simulation(
                     step=step,
                     phase="thinking",
                     message=f"Hypothesis distillation completed. Generated {len(hypotheses)} hypotheses.",
+                )
+                _emit_agent_update(
+                    runtime,
+                    step=step,
+                    stage="analysis",
+                    action="completed",
+                    summary=f"Analysis complete. Generated {len(hypotheses)} hypotheses.",
+                )
+                _emit(
+                    runtime,
+                    "hypothesis.batch_created",
+                    {
+                        "step": step,
+                        "count": len(hypotheses),
+                        "hypotheses": [
+                            {
+                                "hypothesis_id": str(h.get("id", "")).strip(),
+                                "hypothesis_title": str(h.get("title", "")).strip(),
+                                "hypothesis_description": str(h.get("description", "")).strip(),
+                            }
+                            for h in hypotheses
+                        ],
+                    },
+                )
+                _emit_agent_update(
+                    runtime,
+                    step=step,
+                    stage="hypothesis_generation",
+                    action="created",
+                    summary="Candidate hypotheses formed.",
+                    details={"count": len(hypotheses)},
                 )
 
             for hypothesis in hypotheses:
@@ -291,6 +381,16 @@ def _run_simulation(
                         step=step,
                         phase="hypothesis_created",
                         message=f"Created {hyp_id}: {hyp_title}",
+                        hypothesis_id=hyp_id,
+                        hypothesis_title=hyp_title,
+                    )
+                    _emit_agent_update(
+                        runtime,
+                        step=step,
+                        stage="hypothesis_generation",
+                        action="hypothesis_created",
+                        summary=f"Created {hyp_id}: {hyp_title}",
+                        details={"status": status},
                         hypothesis_id=hyp_id,
                         hypothesis_title=hyp_title,
                     )
@@ -327,6 +427,22 @@ def _run_simulation(
                         hypothesis_id=hyp_id,
                         hypothesis_title=hyp_title,
                     )
+                    _emit_agent_update(
+                        runtime,
+                        step=step,
+                        stage="validation",
+                        action="status_changed",
+                        summary=message,
+                        details={
+                            "from_status": prev_status or "unknown",
+                            "to_status": status,
+                            "root_cause": str(hypothesis.get("root_cause", "")),
+                            "evidence": [str(item) for item in hypothesis.get("evidence", [])],
+                            "evidence_count": len(hypothesis.get("evidence", [])),
+                        },
+                        hypothesis_id=hyp_id,
+                        hypothesis_title=hyp_title,
+                    )
                 previous_status[hyp_id] = status
 
             offset = int(snapshot.get("hypothesis_offset", -1))
@@ -344,6 +460,26 @@ def _run_simulation(
                         hypothesis_id=active_id,
                         hypothesis_title=active_title,
                     )
+                    _emit(
+                        runtime,
+                        "hypothesis.focused",
+                        {
+                            "step": step,
+                            "hypothesis_offset": offset,
+                            "hypothesis_id": active_id,
+                            "hypothesis_title": active_title,
+                        },
+                    )
+                    _emit_agent_update(
+                        runtime,
+                        step=step,
+                        stage="validation",
+                        action="focused",
+                        summary=f"Now validating {active_id}: {active_title}.",
+                        details={"hypothesis_offset": offset},
+                        hypothesis_id=active_id,
+                        hypothesis_title=active_title,
+                    )
 
             current_question = str(snapshot.get("current_question", "")).strip()
             if current_question and current_question != previous_question:
@@ -357,6 +493,26 @@ def _run_simulation(
                     step=step,
                     phase="customer_interview",
                     message=f"Interview question drafted: {current_question}",
+                    hypothesis_id=active_id or None,
+                    hypothesis_title=active_title or None,
+                )
+                _emit(
+                    runtime,
+                    "interview.question_drafted",
+                    {
+                        "step": step,
+                        "hypothesis_id": active_id,
+                        "hypothesis_title": active_title,
+                        "question": current_question,
+                    },
+                )
+                _emit_agent_update(
+                    runtime,
+                    step=step,
+                    stage="interview",
+                    action="question_drafted",
+                    summary=f"Drafted interview question for {active_id or 'active hypothesis'}.",
+                    details={"question": current_question},
                     hypothesis_id=active_id or None,
                     hypothesis_title=active_title or None,
                 )
@@ -397,6 +553,21 @@ def _run_simulation(
                             "status": _normalize_hypothesis_status(hypothesis.get("status")),
                         },
                     )
+                    transcript = _transcript_payload(history[: idx + 1])
+                    _emit(
+                        runtime,
+                        "interview.transcript.updated",
+                        {
+                            "step": step,
+                            "hypothesis_id": hyp_id,
+                            "hypothesis_title": hyp_title,
+                            "status": _normalize_hypothesis_status(hypothesis.get("status")),
+                            "latest_message_index": idx,
+                            "latest_message_role": role,
+                            "latest_message_content": content,
+                            "transcript": transcript,
+                        },
+                    )
                     if role == "assistant":
                         _emit_reasoning(
                             runtime,
@@ -406,12 +577,32 @@ def _run_simulation(
                             hypothesis_id=hyp_id,
                             hypothesis_title=hyp_title,
                         )
+                        _emit_agent_update(
+                            runtime,
+                            step=step,
+                            stage="interview",
+                            action="question_asked",
+                            summary=f"Interviewer asked a question for {hyp_id}.",
+                            details={"message_index": idx, "content": content},
+                            hypothesis_id=hyp_id,
+                            hypothesis_title=hyp_title,
+                        )
                     elif role == "user":
                         _emit_reasoning(
                             runtime,
                             step=step,
                             phase="customer_interview",
                             message=f"Customer response captured for {hyp_id}; updating validation confidence.",
+                            hypothesis_id=hyp_id,
+                            hypothesis_title=hyp_title,
+                        )
+                        _emit_agent_update(
+                            runtime,
+                            step=step,
+                            stage="interview",
+                            action="response_captured",
+                            summary=f"Captured stakeholder response for {hyp_id}.",
+                            details={"message_index": idx, "content": content},
                             hypothesis_id=hyp_id,
                             hypothesis_title=hyp_title,
                         )
@@ -426,6 +617,13 @@ def _run_simulation(
             phase="thinking",
             message="Interview validation completed across hypotheses. Drafting final recommendation.",
         )
+        _emit_agent_update(
+            runtime,
+            step=step,
+            stage="synthesis",
+            action="started",
+            summary="All hypothesis interviews complete. Drafting final recommendation.",
+        )
         _emit(
             runtime,
             "final.response",
@@ -434,6 +632,14 @@ def _run_simulation(
                 "final_answer": final_state.get("final_answer", ""),
                 "state": _state_summary(final_state),
             },
+        )
+        _emit_agent_update(
+            runtime,
+            step=step,
+            stage="synthesis",
+            action="completed",
+            summary="Final recommendation generated.",
+            details={"final_answer": final_state.get("final_answer", "")},
         )
         _emit(
             runtime,
@@ -449,6 +655,14 @@ def _run_simulation(
         runtime.status = "failed"
         runtime.completed_at = time.time()
         runtime.error = str(exc)
+        _emit_agent_update(
+            runtime,
+            step=0,
+            stage="error",
+            action="failed",
+            summary="Simulation failed before completion.",
+            details={"message": str(exc)},
+        )
         _emit(runtime, "simulation.error", {"message": str(exc)})
 
 
@@ -460,7 +674,6 @@ def _sse_encode(event: dict[str, Any], event_id: int) -> str:
 
 @app.on_event("startup")
 def _startup() -> None:
-    load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 

@@ -163,6 +163,44 @@ data: {"event":"simulation.step","timestamp":1768859331.1,"simulation_id":"...",
 }
 ```
 
+`agent.update`
+- Primary timeline event for end-user progress rendering.
+- Use this to show clear states like analysis, hypothesis generation, validation, interview, synthesis.
+- Payload:
+
+```json
+{
+  "step": 4,
+  "stage": "interview",
+  "action": "response_captured",
+  "summary": "Captured stakeholder response for h-1.",
+  "hypothesis_id": "h-1",
+  "hypothesis_title": "Onboarding complexity hurt conversion",
+  "details": {
+    "message_index": 1,
+    "content": "A/B test showed +12% conversion after simplification."
+  }
+}
+```
+
+`hypothesis.batch_created`
+- Sent once after distillation, includes all generated hypotheses.
+- Payload:
+
+```json
+{
+  "step": 1,
+  "count": 2,
+  "hypotheses": [
+    {
+      "hypothesis_id": "h-1",
+      "hypothesis_title": "Onboarding complexity hurt conversion",
+      "hypothesis_description": "Simpler onboarding will improve trial-to-paid conversion."
+    }
+  ]
+}
+```
+
 `interview.message`
 - Sent for every newly created interview message.
 - Payload:
@@ -175,6 +213,30 @@ data: {"event":"simulation.step","timestamp":1768859331.1,"simulation_id":"...",
   "role": "user",
   "content": "A/B test showed +12% conversion after simplification.",
   "status": "in_progress"
+}
+```
+
+`interview.transcript.updated`
+- Sent after each new interview message with the latest full transcript for that hypothesis.
+- Payload:
+
+```json
+{
+  "step": 5,
+  "hypothesis_id": "h-1",
+  "hypothesis_title": "Onboarding complexity hurt conversion",
+  "status": "in_progress",
+  "latest_message_index": 1,
+  "latest_message_role": "user",
+  "latest_message_content": "A/B test showed +12% conversion after simplification.",
+  "transcript": {
+    "message_count": 2,
+    "text": "assistant: What evidence shows onboarding complexity changed conversion?\nuser: A/B test showed +12% conversion after simplification.",
+    "messages": [
+      { "role": "assistant", "content": "What evidence shows onboarding complexity changed conversion?" },
+      { "role": "user", "content": "A/B test showed +12% conversion after simplification." }
+    ]
+  }
 }
 ```
 
@@ -198,8 +260,9 @@ data: {"event":"simulation.step","timestamp":1768859331.1,"simulation_id":"...",
 2. On submit, call `POST /api/simulations`.
 3. Open `EventSource` on returned `events_url`.
 4. Render:
-   - `interview.message` as chat bubbles
-   - `simulation.step` as state/progress indicator
+   - `agent.update` as the main activity timeline
+   - `interview.message` or `interview.transcript.updated` as chat/transcript UI
+   - `simulation.step` only for debug state (optional in UI)
 5. On `simulation.completed`:
    - stop loading state
    - show `final_answer`

@@ -2,34 +2,34 @@ import logging
 
 from app.state import State
 
-TERMINAL_STATUSES = {"validated", "invalidated", "cannot_validate"}
+TERMINAL_STATUSES = {"solved"}
 logger = logging.getLogger(__name__)
 
 
-class HypothesisManagerNode:
-    """Select current hypothesis for validation. No interview side-effects here."""
+class TodoManagerNode:
+    """Select current todo for validation. No interview side-effects here."""
 
     def run(self, state: State) -> State:
-        hypotheses = state["hypothesis"]
-        offset = state["hypothesis_offset"]
+        todos = state["todos"]
+        offset = state["todo_offset"]
 
-        while offset < len(hypotheses) and hypotheses[offset]["status"] in TERMINAL_STATUSES:
+        while offset < len(todos) and todos[offset]["status"] in TERMINAL_STATUSES:
             offset += 1
 
-        state["hypothesis_offset"] = offset
+        state["todo_offset"] = offset
 
-        if offset >= len(hypotheses):
-            logger.info("Manager found all hypotheses completed: count=%s", len(hypotheses))
+        if offset >= len(todos):
+            logger.info("Manager found all todos completed: count=%s", len(todos))
             return state
 
-        hypothesis = hypotheses[offset]
-        if hypothesis["status"] == "pending":
-            hypothesis["status"] = "in_progress"
-
+        todo = todos[offset]
         logger.info(
-            "Manager selected hypothesis %s at offset=%s status=%s",
-            hypothesis["id"],
+            "Manager selected todo %s at offset=%s status=%s",
+            todo["id"],
             offset,
-            hypothesis["status"],
+            todo["status"],
         )
         return state
+
+
+HypothesisManagerNode = TodoManagerNode

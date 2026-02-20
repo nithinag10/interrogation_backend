@@ -13,22 +13,23 @@ class BusinessExpertNode:
         self.prompt = BUSINESS_EXPERT_PROMPT
 
     def run(self, state: State) -> State:
-        hypothesis_sections = []
-        for hyp in state["hypothesis"]:
+        todo_sections = []
+        for todo in state["todos"]:
             transcript_lines = []
-            for message in hyp["interview_messages"]:
+            for message in todo["interview_messages"]:
                 transcript_lines.append(f"{message['role']}: {message['content']}")
             transcript = "\n".join(transcript_lines) if transcript_lines else "(no interview transcript)"
 
-            hypothesis_sections.append(
+            todo_sections.append(
                 "\n".join(
                     [
-                        f"Hypothesis ID: {hyp['id']}",
-                        f"Title: {hyp['title']}",
-                        f"Description: {hyp['description']}",
-                        f"Status: {hyp['status']}",
-                        f"Root cause: {hyp.get('root_cause', '')}",
-                        f"Evidence: {hyp['evidence']}",
+                        f"Todo ID: {todo['id']}",
+                        f"Title: {todo['title']}",
+                        f"Description: {todo['description']}",
+                        f"Status: {todo['status']}",
+                        f"Resolution: {todo.get('resolution', '')}",
+                        f"Root cause: {todo.get('root_cause', '')}",
+                        f"Evidence: {todo['evidence']}",
                         "Interview transcript:",
                         transcript,
                     ]
@@ -39,7 +40,7 @@ class BusinessExpertNode:
             f"{self.prompt}\n\n"
             f"User statement:\n{state['user_input']}\n\n"
             f"Stakeholder profile:\n{state['stakeholder']}\n\n"
-            f"Hypothesis results and transcripts:\n\n{chr(10).join(hypothesis_sections)}"
+            f"Todo results and transcripts:\n\n{chr(10).join(todo_sections)}"
         )
 
         response = self.llm.invoke(payload)

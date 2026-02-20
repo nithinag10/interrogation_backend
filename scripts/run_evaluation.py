@@ -24,12 +24,18 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _default_state(max_interview_messages: int, user_input: str, stakeholder: str) -> dict[str, Any]:
+def _default_state(
+    max_interview_messages: int,
+    user_input: str,
+    stakeholder: str,
+    todo_items: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     return {
-        "hypothesis": [],
+        "todos": [],
+        "todo_items": todo_items or [],
         "user_input": user_input,
         "stakeholder": stakeholder,
-        "hypothesis_offset": 0,
+        "todo_offset": 0,
         "final_answer": "",
         "max_interview_messages": max_interview_messages,
         "current_question": "",
@@ -39,39 +45,41 @@ def _default_state(max_interview_messages: int, user_input: str, stakeholder: st
 def _build_dry_run_graph():
     class FakeDistillationNode:
         def run(self, state):
-            state["hypothesis"] = [
+            state["todos"] = [
                 {
-                    "id": "h-1",
+                    "id": "t-1",
                     "title": "Onboarding complexity hurt conversion",
                     "description": "Simpler onboarding will improve trial-to-paid conversion.",
                     "status": "pending",
+                    "resolution": "",
                     "root_cause": "",
                     "evidence": [],
                     "interview_messages": [],
                 }
             ]
-            state["hypothesis_offset"] = 0
+            state["todo_offset"] = 0
             state["current_question"] = ""
             return state
 
     class FakeInterrogationNode:
         def run(self, state):
-            h = state["hypothesis"][state["hypothesis_offset"]]
+            h = state["todos"][state["todo_offset"]]
             if len(h["interview_messages"]) >= 2:
-                h["status"] = "validated"
+                h["status"] = "solved"
+                h["resolution"] = "done"
                 h["root_cause"] = "Onboarding friction increases abandonment before value realization."
                 h["evidence"].append("Pilot users converted better with simpler onboarding.")
                 state["current_question"] = ""
                 return state
             question = "What evidence shows onboarding complexity changed conversion?"
-            h["status"] = "in_progress"
+            h["status"] = "pending"
             h["interview_messages"].append({"role": "assistant", "content": question})
             state["current_question"] = question
             return state
 
     class FakeStakeholderNode:
         def run(self, state):
-            h = state["hypothesis"][state["hypothesis_offset"]]
+            h = state["todos"][state["todo_offset"]]
             h["interview_messages"].append(
                 {"role": "user", "content": "A/B test showed +12% conversion after simplification."}
             )
@@ -145,10 +153,10 @@ def _format_transcript(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _status_counts(hypotheses: list[dict[str, Any]]) -> dict[str, int]:
+def _status_counts(todos: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for hyp in hypotheses:
-        status = str(hyp.get("status", "unknown"))
+    for todo in todos:
+        status = str(todo.get("status", "unknown"))
         counts[status] = counts.get(status, 0) + 1
     return counts
 
@@ -172,10 +180,17 @@ def _run_case(
     if max_messages < 2:
         raise ValueError("max_interview_messages must be >= 2")
 
+    todo_items: list[dict[str, str]] = []
+    for raw in case.get("todo_list", []) or []:
+        text = str(raw).strip()
+        if text:
+            todo_items.append({"title": text, "description": text})
+
     state = _default_state(
         max_interview_messages=max_messages,
         user_input=idea,
         stakeholder=customer_persona,
+        todo_items=todo_items,
     )
 
     steps = 0
@@ -184,15 +199,16 @@ def _run_case(
         steps += 1
         final_state = snapshot
 
-    hypotheses = final_state.get("hypothesis", [])
-    transcript_by_hypothesis: list[dict[str, Any]] = []
-    for hypothesis in hypotheses:
-        messages = hypothesis.get("interview_messages", [])
-        transcript_by_hypothesis.append(
+    todos = final_state.get("todos", [])
+    transcript_by_todo: list[dict[str, Any]] = []
+    for todo in todos:
+        messages = todo.get("interview_messages", [])
+        transcript_by_todo.append(
             {
-                "hypothesis_id": hypothesis.get("id"),
-                "hypothesis_title": hypothesis.get("title"),
-                "status": hypothesis.get("status"),
+                "todo_id": todo.get("id"),
+                "todo_title": todo.get("title"),
+                "status": todo.get("status"),
+                "resolution": todo.get("resolution", ""),
                 "messages": messages,
                 "text": _format_transcript(messages),
             }
@@ -214,15 +230,15 @@ def _run_case(
             "metadata": case.get("metadata", {}),
         },
         "output": {
-            "hypothesis": hypotheses,
-            "interview_transcript": transcript_by_hypothesis,
+            "todos": todos,
+            "interview_transcript": transcript_by_todo,
             "final_response": final_state.get("final_answer", ""),
         },
         "metrics": {
             "steps": steps,
             "duration_seconds": duration_seconds,
-            "hypothesis_count": len(hypotheses),
-            "status_counts": _status_counts(hypotheses),
+            "todo_count": len(todos),
+            "status_counts": _status_counts(todos),
         },
         "error": None,
     }
@@ -303,7 +319,7 @@ def main() -> None:
                 "metrics": {
                     "steps": 0,
                     "duration_seconds": 0.0,
-                    "hypothesis_count": 0,
+                    "todo_count": 0,
                     "status_counts": {},
                 },
                 "error": {

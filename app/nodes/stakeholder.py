@@ -13,7 +13,7 @@ class StakeholderNode:
         self.prompt = STAKEHOLDER_PROFILE_PROMPT
 
     def run(self, state: State) -> State:
-        hypothesis = state["hypothesis"][state["hypothesis_offset"]]
+        todo = state["todos"][state["todo_offset"]]
         question = state.get("current_question", "").strip()
 
         if not question:
@@ -21,25 +21,33 @@ class StakeholderNode:
             return state
 
         history_lines = []
-        for msg in hypothesis["interview_messages"]:
+        for msg in todo["interview_messages"]:
             history_lines.append(f'{msg["role"]}: {msg["content"]}')
         history_text = "\n".join(history_lines) if history_lines else "(no interview messages yet)"
 
-        payload = (
+        system_prompt = (
             f"{self.prompt}\n\n"
-            f"Stakeholder profile:\n{state['stakeholder']}\n\n"
+            f"You are this stakeholder:\n{state['stakeholder']}\n\n"
+            "Stay fully in character."
+        )
+        user_prompt = (
             f"Interview conversation so far:\n{history_text}\n\n"
             f"Interviewer question:\n{question}\n\n"
-            f"Answer as the stakeholder:"
+            "Answer as the stakeholder."
         )
 
-        response = self.llm.invoke(payload)
+        response = self.llm.invoke(
+            [
+                ("system", system_prompt),
+                ("human", user_prompt),
+            ]
+        )
         content = response.content if hasattr(response, "content") else str(response)
 
-        hypothesis["interview_messages"].append(
+        todo["interview_messages"].append(
             {"role": "user", "content": content}
         )
 
         state["current_question"] = ""
-        logger.info("Stakeholder answered hypothesis %s", hypothesis["id"])
+        logger.info("Stakeholder answered todo %s", todo["id"])
         return state

@@ -1,12 +1,9 @@
 from typing import Literal, TypedDict
 
 
-HypothesisStatus = Literal[
+TodoStatus = Literal[
     "pending",
-    "in_progress",
-    "validated",
-    "invalidated",
-    "cannot_validate",
+    "solved",
 ]
 
 
@@ -15,21 +12,23 @@ class InterviewMessage(TypedDict):
     content: str
 
 
-class Hypothesis(TypedDict):
+class TodoItem(TypedDict):
     id: str
     title: str
     description: str
-    status: HypothesisStatus
+    status: TodoStatus
+    resolution: Literal["", "done", "dropped", "blocked"]
     root_cause: str
     evidence: list[str]
     interview_messages: list[InterviewMessage]
 
 
 class State(TypedDict):
-    hypothesis: list[Hypothesis]
+    todos: list[TodoItem]
+    todo_items: list[dict[str, str]]
     user_input: str
     stakeholder: str
-    hypothesis_offset: int
+    todo_offset: int
     final_answer: str
     max_interview_messages: int
     current_question: str

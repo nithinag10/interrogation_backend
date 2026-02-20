@@ -40,6 +40,7 @@ class StakeholderCatalogResponse(BaseModel):
 class StartSimulationRequest(BaseModel):
     idea: str | None = Field(default=None, min_length=1)
     user_input: str | None = Field(default=None, min_length=1)
+    todo_list: list[str] | None = None
     stakeholder_id: str | None = None
     customer_persona: str | None = None
     stakeholder_profile: str | None = None
@@ -104,12 +105,18 @@ SIMULATIONS: dict[str, SimulationRuntime] = {}
 SIMULATIONS_LOCK = threading.Lock()
 
 
-def _default_state(max_interview_messages: int, user_input: str, stakeholder: str) -> dict[str, Any]:
+def _default_state(
+    max_interview_messages: int,
+    user_input: str,
+    stakeholder: str,
+    todo_items: list[dict[str, str]],
+) -> dict[str, Any]:
     return {
-        "hypothesis": [],
+        "todos": [],
+        "todo_items": todo_items,
         "user_input": user_input,
         "stakeholder": stakeholder,
-        "hypothesis_offset": 0,
+        "todo_offset": 0,
         "final_answer": "",
         "max_interview_messages": max_interview_messages,
         "current_question": "",
@@ -132,11 +139,27 @@ def _load_stakeholders() -> list[StakeholderDefinition]:
 def _resolve_user_input(idea: str | None, user_input: str | None) -> str:
     if idea and idea.strip():
         return idea.strip()
-
     if user_input and user_input.strip():
         return user_input.strip()
-
     raise HTTPException(status_code=400, detail="Provide either idea or user_input.")
+
+
+def _resolve_todo_items(todo_list: list[str] | None) -> list[dict[str, str]]:
+    if todo_list is None:
+        return []
+    todo_items: list[dict[str, str]] = []
+    for raw in todo_list:
+        text = str(raw).strip()
+        if not text:
+            continue
+        todo_items.append({"title": text, "description": text})
+
+    if not todo_items:
+        raise HTTPException(
+            status_code=400,
+            detail="todo_list was provided but no non-empty todo items were found.",
+        )
+    return todo_items
 
 
 def _resolve_stakeholder_profile(
@@ -176,35 +199,30 @@ def _emit(runtime: SimulationRuntime, event_type: str, payload: dict[str, Any]) 
 
 
 def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
-    hypotheses = state.get("hypothesis", [])
+    todos = state.get("todos", [])
     return {
-        "hypothesis_offset": state.get("hypothesis_offset"),
+        "todo_offset": state.get("todo_offset"),
         "current_question": state.get("current_question"),
         "final_answer": state.get("final_answer"),
-        "hypotheses": [
+        "todos": [
             {
-                "id": hyp.get("id"),
-                "title": hyp.get("title"),
-                "status": hyp.get("status"),
-                "root_cause": hyp.get("root_cause"),
-                "evidence_count": len(hyp.get("evidence", [])),
-                "interview_message_count": len(hyp.get("interview_messages", [])),
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "status": item.get("status"),
+                "resolution": item.get("resolution", ""),
+                "root_cause": item.get("root_cause"),
+                "evidence_count": len(item.get("evidence", [])),
+                "interview_message_count": len(item.get("interview_messages", [])),
             }
-            for hyp in hypotheses
+            for item in todos
         ],
     }
 
 
-def _normalize_hypothesis_status(status: Any) -> str:
+def _normalize_todo_status(status: Any) -> str:
     value = str(status or "")
-    if value == "validated":
-        return "validated"
-    if value == "invalidated":
-        return "invalidated"
-    if value == "cannot_validate":
-        return "cannot_validate"
-    if value == "in_progress":
-        return "in_progress"
+    if value == "solved":
+        return "solved"
     return "pending"
 
 
@@ -213,18 +231,18 @@ def _emit_reasoning(
     step: int,
     phase: str,
     message: str,
-    hypothesis_id: str | None = None,
-    hypothesis_title: str | None = None,
+    todo_id: str | None = None,
+    todo_title: str | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "step": step,
         "phase": phase,
         "message": message,
     }
-    if hypothesis_id:
-        payload["hypothesis_id"] = hypothesis_id
-    if hypothesis_title:
-        payload["hypothesis_title"] = hypothesis_title
+    if todo_id:
+        payload["todo_id"] = todo_id
+    if todo_title:
+        payload["todo_title"] = todo_title
     _emit(runtime, "reasoning.step", payload)
 
 
@@ -235,8 +253,8 @@ def _emit_agent_update(
     action: str,
     summary: str,
     details: dict[str, Any] | None = None,
-    hypothesis_id: str | None = None,
-    hypothesis_title: str | None = None,
+    todo_id: str | None = None,
+    todo_title: str | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "step": step,
@@ -245,10 +263,10 @@ def _emit_agent_update(
         "summary": summary,
         "details": details or {},
     }
-    if hypothesis_id:
-        payload["hypothesis_id"] = hypothesis_id
-    if hypothesis_title:
-        payload["hypothesis_title"] = hypothesis_title
+    if todo_id:
+        payload["todo_id"] = todo_id
+    if todo_title:
+        payload["todo_title"] = todo_title
     _emit(runtime, "agent.update", payload)
 
 
@@ -272,6 +290,7 @@ def _run_simulation(
     request: StartSimulationRequest,
     user_input: str,
     stakeholder_profile: str,
+    todo_items: list[dict[str, str]],
 ) -> None:
     try:
         graph = build_graph()
@@ -279,6 +298,7 @@ def _run_simulation(
             max_interview_messages=request.max_interview_messages,
             user_input=user_input,
             stakeholder=stakeholder_profile,
+            todo_items=todo_items,
         )
         _emit(
             runtime,
@@ -286,25 +306,26 @@ def _run_simulation(
             {
                 "max_interview_messages": request.max_interview_messages,
                 "user_input": user_input,
+                "todo_count": len(todo_items),
             },
         )
         _emit_reasoning(
             runtime,
             step=0,
             phase="thinking",
-            message="Simulation started. Analyzing idea and preparing candidate hypotheses.",
+            message="Simulation started. Loading todo items and preparing validation flow.",
         )
         _emit_agent_update(
             runtime,
             step=0,
             stage="analysis",
             action="started",
-            summary="Analyzing input and preparing hypotheses.",
+            summary="Loading provided todo items for validation.",
             details={"user_input": user_input},
         )
 
         step = 0
-        known_hypotheses: set[str] = set()
+        known_todos: set[str] = set()
         previous_status: dict[str, str] = {}
         previous_counts: dict[str, int] = {}
         previous_question: str = ""
@@ -315,117 +336,142 @@ def _run_simulation(
             final_state = snapshot
             _emit(runtime, "simulation.step", {"step": step, "state": _state_summary(snapshot)})
 
-            hypotheses = snapshot.get("hypothesis", [])
+            todos = snapshot.get("todos", [])
 
-            if hypotheses and not known_hypotheses:
+            if todos and not known_todos:
+                using_todo_list = bool(snapshot.get("todo_items"))
+                created_message = (
+                    f"Loaded {len(todos)} todo items for validation."
+                    if using_todo_list
+                    else f"Generated {len(todos)} todos."
+                )
                 _emit_reasoning(
                     runtime,
                     step=step,
                     phase="thinking",
-                    message=f"Hypothesis distillation completed. Generated {len(hypotheses)} hypotheses.",
+                    message=created_message,
                 )
                 _emit_agent_update(
                     runtime,
                     step=step,
                     stage="analysis",
                     action="completed",
-                    summary=f"Analysis complete. Generated {len(hypotheses)} hypotheses.",
+                    summary=created_message,
                 )
                 _emit(
                     runtime,
-                    "hypothesis.batch_created",
+                    "todo.batch_created",
                     {
                         "step": step,
-                        "count": len(hypotheses),
-                        "hypotheses": [
+                        "count": len(todos),
+                        "todos": [
                             {
-                                "hypothesis_id": str(h.get("id", "")).strip(),
-                                "hypothesis_title": str(h.get("title", "")).strip(),
-                                "hypothesis_description": str(h.get("description", "")).strip(),
+                                "todo_id": str(h.get("id", "")).strip(),
+                                "todo_title": str(h.get("title", "")).strip(),
+                                "todo_description": str(h.get("description", "")).strip(),
                             }
-                            for h in hypotheses
+                            for h in todos
                         ],
                     },
                 )
+                if using_todo_list:
+                    _emit(
+                        runtime,
+                        "todo.batch_loaded",
+                        {
+                            "step": step,
+                            "count": len(todos),
+                            "todo_items": [
+                                {
+                                    "todo_id": str(h.get("id", "")).strip(),
+                                    "todo_title": str(h.get("title", "")).strip(),
+                                    "todo_description": str(h.get("description", "")).strip(),
+                                }
+                                for h in todos
+                            ],
+                        },
+                    )
                 _emit_agent_update(
                     runtime,
                     step=step,
-                    stage="hypothesis_generation",
+                    stage="validation_items",
                     action="created",
-                    summary="Candidate hypotheses formed.",
-                    details={"count": len(hypotheses)},
+                    summary="Validation items prepared.",
+                    details={"count": len(todos)},
                 )
 
-            for hypothesis in hypotheses:
-                hyp_id = str(hypothesis.get("id", "")).strip()
-                if not hyp_id:
+            for todo in todos:
+                todo_id = str(todo.get("id", "")).strip()
+                if not todo_id:
                     continue
-                hyp_title = str(hypothesis.get("title", "")).strip() or hyp_id
-                status = _normalize_hypothesis_status(hypothesis.get("status"))
+                todo_title = str(todo.get("title", "")).strip() or todo_id
+                status = _normalize_todo_status(todo.get("status"))
 
-                if hyp_id not in known_hypotheses:
-                    known_hypotheses.add(hyp_id)
+                if todo_id not in known_todos:
+                    known_todos.add(todo_id)
                     _emit(
                         runtime,
-                        "hypothesis.created",
+                        "todo.created",
                         {
                             "step": step,
-                            "hypothesis_id": hyp_id,
-                            "hypothesis_title": hyp_title,
-                            "hypothesis_description": hypothesis.get("description", ""),
+                            "todo_id": todo_id,
+                            "todo_title": todo_title,
+                            "todo_description": todo.get("description", ""),
                             "status": status,
                         },
                     )
                     _emit_reasoning(
                         runtime,
                         step=step,
-                        phase="hypothesis_created",
-                        message=f"Created {hyp_id}: {hyp_title}",
-                        hypothesis_id=hyp_id,
-                        hypothesis_title=hyp_title,
+                        phase="todo_created",
+                        message=f"Created {todo_id}: {todo_title}",
+                        todo_id=todo_id,
+                        todo_title=todo_title,
                     )
                     _emit_agent_update(
                         runtime,
                         step=step,
-                        stage="hypothesis_generation",
-                        action="hypothesis_created",
-                        summary=f"Created {hyp_id}: {hyp_title}",
+                        stage="todo_generation",
+                        action="todo_created",
+                        summary=f"Created {todo_id}: {todo_title}",
                         details={"status": status},
-                        hypothesis_id=hyp_id,
-                        hypothesis_title=hyp_title,
+                        todo_id=todo_id,
+                        todo_title=todo_title,
                     )
 
-                prev_status = previous_status.get(hyp_id)
+                prev_status = previous_status.get(todo_id)
                 if prev_status != status:
                     _emit(
                         runtime,
-                        "hypothesis.validation",
+                        "todo.validation",
                         {
                             "step": step,
-                            "hypothesis_id": hyp_id,
-                            "hypothesis_title": hyp_title,
+                            "todo_id": todo_id,
+                            "todo_title": todo_title,
                             "status": status,
-                            "root_cause": hypothesis.get("root_cause", ""),
-                            "evidence_count": len(hypothesis.get("evidence", [])),
+                            "resolution": str(todo.get("resolution", "")),
+                            "root_cause": todo.get("root_cause", ""),
+                            "evidence_count": len(todo.get("evidence", [])),
                         },
                     )
-                    if status == "in_progress":
-                        message = f"Validating {hyp_id}: gathering customer evidence."
-                    elif status == "validated":
-                        message = f"{hyp_id} validated with sufficient interview evidence."
-                    elif status == "invalidated":
-                        message = f"{hyp_id} invalidated based on interview evidence."
-                    elif status == "cannot_validate":
-                        message = f"{hyp_id} marked cannot_validate due to insufficient or low-quality evidence."
+                    resolution = str(todo.get("resolution", ""))
+                    if status == "solved" and resolution == "done":
+                        message = f"{todo_id} solved: done with sufficient interview evidence."
+                    elif status == "solved" and resolution == "dropped":
+                        message = f"{todo_id} solved: dropped based on interview evidence."
+                    elif status == "solved" and resolution == "blocked":
+                        message = f"{todo_id} solved: blocked due to insufficient or low-quality evidence."
+                    elif status == "solved":
+                        message = f"{todo_id} solved."
                     else:
-                        message = f"{hyp_id} queued for validation."
+                        message = f"Validating {todo_id}: gathering customer evidence."
                     _emit_reasoning(
                         runtime,
                         step=step,
-                        phase="hypothesis_validation",
+                        phase="todo_validation",
                         message=message,
-                        hypothesis_id=hyp_id,
-                        hypothesis_title=hyp_title,
+                        todo_id=todo_id,
+                        todo_title=todo_title,
                     )
                     _emit_agent_update(
                         runtime,
@@ -436,20 +482,21 @@ def _run_simulation(
                         details={
                             "from_status": prev_status or "unknown",
                             "to_status": status,
-                            "root_cause": str(hypothesis.get("root_cause", "")),
-                            "evidence": [str(item) for item in hypothesis.get("evidence", [])],
-                            "evidence_count": len(hypothesis.get("evidence", [])),
+                            "resolution": str(todo.get("resolution", "")),
+                            "root_cause": str(todo.get("root_cause", "")),
+                            "evidence": [str(item) for item in todo.get("evidence", [])],
+                            "evidence_count": len(todo.get("evidence", [])),
                         },
-                        hypothesis_id=hyp_id,
-                        hypothesis_title=hyp_title,
+                        todo_id=todo_id,
+                        todo_title=todo_title,
                     )
-                previous_status[hyp_id] = status
+                previous_status[todo_id] = status
 
-            offset = int(snapshot.get("hypothesis_offset", -1))
+            offset = int(snapshot.get("todo_offset", -1))
             if offset != previous_offset:
                 previous_offset = offset
-                if 0 <= offset < len(hypotheses):
-                    active = hypotheses[offset]
+                if 0 <= offset < len(todos):
+                    active = todos[offset]
                     active_id = str(active.get("id", "")).strip()
                     active_title = str(active.get("title", "")).strip() or active_id
                     _emit_reasoning(
@@ -457,17 +504,17 @@ def _run_simulation(
                         step=step,
                         phase="thinking",
                         message=f"Focused validation on {active_id}: {active_title}.",
-                        hypothesis_id=active_id,
-                        hypothesis_title=active_title,
+                        todo_id=active_id,
+                        todo_title=active_title,
                     )
                     _emit(
                         runtime,
-                        "hypothesis.focused",
+                        "todo.focused",
                         {
                             "step": step,
-                            "hypothesis_offset": offset,
-                            "hypothesis_id": active_id,
-                            "hypothesis_title": active_title,
+                            "todo_offset": offset,
+                            "todo_id": active_id,
+                            "todo_title": active_title,
                         },
                     )
                     _emit_agent_update(
@@ -476,16 +523,16 @@ def _run_simulation(
                         stage="validation",
                         action="focused",
                         summary=f"Now validating {active_id}: {active_title}.",
-                        details={"hypothesis_offset": offset},
-                        hypothesis_id=active_id,
-                        hypothesis_title=active_title,
+                        details={"todo_offset": offset},
+                        todo_id=active_id,
+                        todo_title=active_title,
                     )
 
             current_question = str(snapshot.get("current_question", "")).strip()
             if current_question and current_question != previous_question:
                 active = None
-                if 0 <= offset < len(hypotheses):
-                    active = hypotheses[offset]
+                if 0 <= offset < len(todos):
+                    active = todos[offset]
                 active_id = str(active.get("id", "")).strip() if active else ""
                 active_title = str(active.get("title", "")).strip() if active else ""
                 _emit_reasoning(
@@ -493,16 +540,16 @@ def _run_simulation(
                     step=step,
                     phase="customer_interview",
                     message=f"Interview question drafted: {current_question}",
-                    hypothesis_id=active_id or None,
-                    hypothesis_title=active_title or None,
+                    todo_id=active_id or None,
+                    todo_title=active_title or None,
                 )
                 _emit(
                     runtime,
                     "interview.question_drafted",
                     {
                         "step": step,
-                        "hypothesis_id": active_id,
-                        "hypothesis_title": active_title,
+                        "todo_id": active_id,
+                        "todo_title": active_title,
                         "question": current_question,
                     },
                 )
@@ -511,18 +558,18 @@ def _run_simulation(
                     step=step,
                     stage="interview",
                     action="question_drafted",
-                    summary=f"Drafted interview question for {active_id or 'active hypothesis'}.",
+                    summary=f"Drafted interview question for {active_id or 'active todo'}.",
                     details={"question": current_question},
-                    hypothesis_id=active_id or None,
-                    hypothesis_title=active_title or None,
+                    todo_id=active_id or None,
+                    todo_title=active_title or None,
                 )
             previous_question = current_question
 
-            for hypothesis in snapshot.get("hypothesis", []):
-                hyp_id = str(hypothesis.get("id", "")).strip()
-                hyp_title = str(hypothesis.get("title", "")).strip() or hyp_id
-                history = hypothesis.get("interview_messages", [])
-                prev_count = previous_counts.get(hyp_id, 0)
+            for todo in snapshot.get("todos", []):
+                todo_id = str(todo.get("id", "")).strip()
+                todo_title = str(todo.get("title", "")).strip() or todo_id
+                history = todo.get("interview_messages", [])
+                prev_count = previous_counts.get(todo_id, 0)
                 for idx in range(prev_count, len(history)):
                     message = history[idx]
                     role = str(message.get("role", ""))
@@ -532,12 +579,12 @@ def _run_simulation(
                         "interview.message",
                         {
                             "step": step,
-                            "hypothesis_id": hyp_id,
-                            "hypothesis_title": hyp_title,
+                            "todo_id": todo_id,
+                            "todo_title": todo_title,
                             "message_index": idx,
                             "role": role,
                             "content": content,
-                            "status": hypothesis.get("status"),
+                            "status": todo.get("status"),
                         },
                     )
                     _emit(
@@ -545,12 +592,12 @@ def _run_simulation(
                         "interview.transcript",
                         {
                             "step": step,
-                            "hypothesis_id": hyp_id,
-                            "hypothesis_title": hyp_title,
+                            "todo_id": todo_id,
+                            "todo_title": todo_title,
                             "message_index": idx,
                             "role": role,
                             "content": content,
-                            "status": _normalize_hypothesis_status(hypothesis.get("status")),
+                            "status": _normalize_todo_status(todo.get("status")),
                         },
                     )
                     transcript = _transcript_payload(history[: idx + 1])
@@ -559,9 +606,9 @@ def _run_simulation(
                         "interview.transcript.updated",
                         {
                             "step": step,
-                            "hypothesis_id": hyp_id,
-                            "hypothesis_title": hyp_title,
-                            "status": _normalize_hypothesis_status(hypothesis.get("status")),
+                            "todo_id": todo_id,
+                            "todo_title": todo_title,
+                            "status": _normalize_todo_status(todo.get("status")),
                             "latest_message_index": idx,
                             "latest_message_role": role,
                             "latest_message_content": content,
@@ -573,40 +620,40 @@ def _run_simulation(
                             runtime,
                             step=step,
                             phase="customer_interview",
-                            message=f"Interviewer asked a follow-up for {hyp_id}.",
-                            hypothesis_id=hyp_id,
-                            hypothesis_title=hyp_title,
+                            message=f"Interviewer asked a follow-up for {todo_id}.",
+                            todo_id=todo_id,
+                            todo_title=todo_title,
                         )
                         _emit_agent_update(
                             runtime,
                             step=step,
                             stage="interview",
                             action="question_asked",
-                            summary=f"Interviewer asked a question for {hyp_id}.",
+                            summary=f"Interviewer asked a question for {todo_id}.",
                             details={"message_index": idx, "content": content},
-                            hypothesis_id=hyp_id,
-                            hypothesis_title=hyp_title,
+                            todo_id=todo_id,
+                            todo_title=todo_title,
                         )
                     elif role == "user":
                         _emit_reasoning(
                             runtime,
                             step=step,
                             phase="customer_interview",
-                            message=f"Customer response captured for {hyp_id}; updating validation confidence.",
-                            hypothesis_id=hyp_id,
-                            hypothesis_title=hyp_title,
+                            message=f"Customer response captured for {todo_id}; updating validation confidence.",
+                            todo_id=todo_id,
+                            todo_title=todo_title,
                         )
                         _emit_agent_update(
                             runtime,
                             step=step,
                             stage="interview",
                             action="response_captured",
-                            summary=f"Captured stakeholder response for {hyp_id}.",
+                            summary=f"Captured stakeholder response for {todo_id}.",
                             details={"message_index": idx, "content": content},
-                            hypothesis_id=hyp_id,
-                            hypothesis_title=hyp_title,
+                            todo_id=todo_id,
+                            todo_title=todo_title,
                         )
-                previous_counts[hyp_id] = len(history)
+                previous_counts[todo_id] = len(history)
 
         runtime.final_state = final_state
         runtime.status = "completed"
@@ -615,14 +662,14 @@ def _run_simulation(
             runtime,
             step=step,
             phase="thinking",
-            message="Interview validation completed across hypotheses. Drafting final recommendation.",
+            message="Interview validation completed across items. Drafting final recommendation.",
         )
         _emit_agent_update(
             runtime,
             step=step,
             stage="synthesis",
             action="started",
-            summary="All hypothesis interviews complete. Drafting final recommendation.",
+            summary="All item interviews complete. Drafting final recommendation.",
         )
         _emit(
             runtime,
@@ -690,6 +737,7 @@ def list_stakeholders() -> StakeholderCatalogResponse:
 @app.post("/api/simulations", response_model=StartSimulationResponse, status_code=202)
 def start_simulation(request: StartSimulationRequest) -> StartSimulationResponse:
     user_input = _resolve_user_input(idea=request.idea, user_input=request.user_input)
+    todo_items = _resolve_todo_items(request.todo_list)
     stakeholder_profile = _resolve_stakeholder_profile(
         stakeholder_id=request.stakeholder_id,
         stakeholder_profile=request.stakeholder_profile,
@@ -703,7 +751,7 @@ def start_simulation(request: StartSimulationRequest) -> StartSimulationResponse
 
     worker = threading.Thread(
         target=_run_simulation,
-        args=(runtime, request, user_input, stakeholder_profile),
+        args=(runtime, request, user_input, stakeholder_profile, todo_items),
         name=f"simulation-{simulation_id}",
         daemon=True,
     )

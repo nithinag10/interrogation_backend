@@ -5,31 +5,31 @@ from langgraph.graph import END, START, StateGraph
 from app.nodes.business_expert import BusinessExpertNode
 from app.nodes.checkpoint import CheckpointNode
 from app.nodes.distillation import DistillationNode
-from app.nodes.hypothesis_manager import HypothesisManagerNode
+from app.nodes.hypothesis_manager import TodoManagerNode
 from app.nodes.interrogation import InterrogationNode
 from app.nodes.stakeholder import StakeholderNode
 from app.state import State
 
 
-TERMINAL_STATUSES = {"validated", "invalidated", "cannot_validate"}
+TERMINAL_STATUSES = {"solved"}
 logger = logging.getLogger(__name__)
 
 
 def _route_after_manager(state: State) -> str:
-    if state["hypothesis_offset"] >= len(state["hypothesis"]):
+    if state["todo_offset"] >= len(state["todos"]):
         logger.info("Route(manager): business_expert")
         return "business_expert"
-    logger.info("Route(manager): interrogate hypothesis offset=%s", state["hypothesis_offset"])
+    logger.info("Route(manager): interrogate todo offset=%s", state["todo_offset"])
     return "interrogate"
 
 
 def _route_after_checkpoint(state: State) -> str:
-    offset = state["hypothesis_offset"]
-    if offset >= len(state["hypothesis"]):
+    offset = state["todo_offset"]
+    if offset >= len(state["todos"]):
         logger.info("Route(checkpoint): manager (offset out of range)")
         return "manager"
 
-    current = state["hypothesis"][offset]
+    current = state["todos"][offset]
     if current["status"] in TERMINAL_STATUSES:
         logger.info("Route(checkpoint): manager (terminal status=%s)", current["status"])
         return "manager"
@@ -44,7 +44,7 @@ def _route_after_checkpoint(state: State) -> str:
 
 def build_graph(
     distillation_node: DistillationNode | None = None,
-    manager_node: HypothesisManagerNode | None = None,
+    manager_node: TodoManagerNode | None = None,
     interrogation_node: InterrogationNode | None = None,
     stakeholder_node: StakeholderNode | None = None,
     checkpoint_node: CheckpointNode | None = None,
@@ -53,7 +53,7 @@ def build_graph(
     graph = StateGraph(State)
 
     distillation = distillation_node or DistillationNode()
-    manager = manager_node or HypothesisManagerNode()
+    manager = manager_node or TodoManagerNode()
     interrogation = interrogation_node or InterrogationNode()
     stakeholder = stakeholder_node or StakeholderNode()
     checkpoint = checkpoint_node or CheckpointNode()

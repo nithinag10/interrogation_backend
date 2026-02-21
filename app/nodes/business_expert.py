@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class BusinessExpertNode:
     def __init__(self):
-        self.llm = OpenAIClient().get_client()
+        self.llm = OpenAIClient(model="gpt-5.2-2025-12-11", temperature=0.8).get_client()
         self.prompt = BUSINESS_EXPERT_PROMPT
 
     def run(self, state: State) -> State:

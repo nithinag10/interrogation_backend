@@ -105,6 +105,15 @@ SIMULATIONS: dict[str, SimulationRuntime] = {}
 SIMULATIONS_LOCK = threading.Lock()
 
 
+def _log_usage_event(event_type: str, simulation_id: str, payload: dict[str, Any]) -> None:
+    """Emit structured usage logs for downstream analytics."""
+    logger.info(
+        "usage_event=%s payload=%s",
+        event_type,
+        json.dumps({"simulation_id": simulation_id, **payload}, ensure_ascii=False),
+    )
+
+
 def _default_state(
     max_interview_messages: int,
     user_input: str,
@@ -246,6 +255,14 @@ def _run_simulation(
 ) -> None:
     try:
         graph = build_graph()
+        _log_usage_event(
+            "simulation.run_started",
+            runtime.simulation_id,
+            {
+                "max_interview_messages": request.max_interview_messages,
+                "todo_count": len(todo_items),
+            },
+        )
         state = _default_state(
             max_interview_messages=request.max_interview_messages,
             user_input=user_input,
@@ -360,6 +377,18 @@ def _run_simulation(
                     content = str(message.get("content", "")).strip()
                     if not content:
                         continue
+                    _log_usage_event(
+                        "interview.message",
+                        runtime.simulation_id,
+                        {
+                            "step": step,
+                            "todo_id": todo_id,
+                            "todo_title": todo_title,
+                            "message_index": idx,
+                            "role": role,
+                            "content": content,
+                        },
+                    )
                     _emit(
                         runtime,
                         "interview.message",
@@ -428,11 +457,25 @@ def _run_simulation(
                 "state": _state_summary(final_state),
             },
         )
+        _log_usage_event(
+            "simulation.completed",
+            runtime.simulation_id,
+            {
+                "steps": step,
+                "final_answer": str(final_state.get("final_answer", "")),
+                "status": runtime.status,
+            },
+        )
     except Exception as exc:  # pragma: no cover
         logger.exception("Simulation failed")
         runtime.status = "failed"
         runtime.completed_at = time.time()
         runtime.error = str(exc)
+        _log_usage_event(
+            "simulation.error",
+            runtime.simulation_id,
+            {"status": runtime.status, "error": str(exc)},
+        )
         _emit(runtime, "simulation.error", {"message": str(exc)})
 
 
@@ -468,6 +511,20 @@ def start_simulation(request: StartSimulationRequest) -> StartSimulationResponse
     )
     simulation_id = str(uuid.uuid4())
     runtime = SimulationRuntime(simulation_id=simulation_id)
+    _log_usage_event(
+        "simulation.request_received",
+        simulation_id,
+        {
+            "user_input": user_input,
+            "max_interview_messages": request.max_interview_messages,
+            "todo_list_count": len(todo_items),
+            "stakeholder_id": request.stakeholder_id,
+            "has_customer_persona": bool(request.customer_persona and request.customer_persona.strip()),
+            "has_stakeholder_profile": bool(
+                request.stakeholder_profile and request.stakeholder_profile.strip()
+            ),
+        },
+    )
 
     with SIMULATIONS_LOCK:
         SIMULATIONS[simulation_id] = runtime

@@ -44,7 +44,7 @@ class StartSimulationRequest(BaseModel):
     stakeholder_id: str | None = None
     customer_persona: str | None = None
     stakeholder_profile: str | None = None
-    max_interview_messages: int = Field(default=8, ge=2, le=40)
+    max_interview_messages: int = Field(default=12, ge=2, le=40)
 
 
 class StartSimulationResponse(BaseModel):
